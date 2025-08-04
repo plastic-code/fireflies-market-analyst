@@ -1,53 +1,61 @@
 import streamlit as st
-from langchain_community.chat_models import ChatOpenAI
-from langchain.chains.question_answering import load_qa_chain
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.document_loaders import TextLoader
-from langchain.vectorstores import FAISS
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_community.document_loaders import TextLoader
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import RetrievalQA
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import tempfile
 import os
 
-# Load OpenAI API Key securely from Streamlit Secrets
-openai_api_key = st.secrets["OPENAI_API_KEY"]
-os.environ["OPENAI_API_KEY"] = openai_api_key
-
-# Streamlit UI
-st.set_page_config(page_title="Fireflies Market Assistant", layout="wide")
+# Set up Streamlit UI
+st.set_page_config(page_title="🦜🔍 Fireflies Market Assistant", layout="wide")
 st.title("🦜🔍 Fireflies Market Assistant")
-st.markdown("Upload a Fireflies meeting transcript and get market intelligence insights using GPT.")
+st.markdown(
+    "Upload a Fireflies meeting transcript and get market intelligence insights using GPT."
+)
 
-# Upload file
+# Upload .txt file
 uploaded_file = st.file_uploader("Upload a Fireflies transcript (.txt)", type=["txt"])
+user_question = st.text_input("Ask a specific question (optional):")
 
-# Optional: User question
-query = st.text_input("Ask a specific question (optional):")
+# Load API key from Streamlit secrets
+openai_api_key = st.secrets["OPENAI_API_KEY"]
 
 if uploaded_file:
-    # Save uploaded file temporarily
-    with open("temp_transcript.txt", "wb") as f:
-        f.write(uploaded_file.read())
+    # Save file to temp
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_path = tmp_file.name
 
-    # Load and split
-    loader = TextLoader("temp_transcript.txt")
-    documents = loader.load()
+    # Load document
+    loader = TextLoader(tmp_path, encoding="utf-8")
+    texts = loader.load()
 
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    texts = text_splitter.split_documents(documents)
+    # Split long documents into chunks
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = text_splitter.split_documents(texts)
 
-    # Embedding & Vector Store
-    embeddings = OpenAIEmbeddings()
-    db = FAISS.from_documents(texts, embeddings)
+    # Create embeddings and vector DB
+    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+    db = FAISS.from_documents(docs, embeddings)
 
-    # Search
-    if query:
-        docs = db.similarity_search(query)
-    else:
-        docs = texts[:3]  # Default: use first few chunks
+    # Create retriever-based QA system
+    retriever = db.as_retriever()
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=ChatOpenAI(openai_api_key=openai_api_key),
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+    )
 
-    # Run QA chain
-    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
-    chain = load_qa_chain(llm, chain_type="stuff")
-    response = chain.run(input_documents=docs, question=query or "What are the key market insights from this meeting?")
+    # Run chain
+    query = user_question if user_question else "What are the key market insights?"
+    with st.spinner("Analyzing transcript..."):
+        result = qa_chain({"query": query})
+        answer = result["result"]
+        st.subheader("🧠 Answer")
+        st.write(answer)
 
-    st.subheader("📌 Extracted Insight")
-    st.write(response)
+    # Clean up
+    os.remove(tmp_path)
