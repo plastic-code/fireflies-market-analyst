@@ -1,43 +1,53 @@
-import os
 import streamlit as st
+from langchain.chat_models import ChatOpenAI
+from langchain.chains.question_answering import load_qa_chain
+from langchain.text_splitter import CharacterTextSplitter
 from langchain.document_loaders import TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA
-from langchain.llms import OpenAI
+from langchain.vectorstores import FAISS
+from langchain.embeddings.openai import OpenAIEmbeddings
+import os
 
-st.title("🧠 Fireflies Market Intelligence Assistant")
+# Load OpenAI API Key securely from Streamlit Secrets
+openai_api_key = st.secrets["OPENAI_API_KEY"]
+os.environ["OPENAI_API_KEY"] = openai_api_key
 
-# Step 1: Upload Transcript
-uploaded_file = st.file_uploader("Upload a Fireflies Meeting Transcript (.txt)", type="txt")
+# Streamlit UI
+st.set_page_config(page_title="Fireflies Market Assistant", layout="wide")
+st.title("🦜🔍 Fireflies Market Assistant")
+st.markdown("Upload a Fireflies meeting transcript and get market intelligence insights using GPT.")
+
+# Upload file
+uploaded_file = st.file_uploader("Upload a Fireflies transcript (.txt)", type=["txt"])
+
+# Optional: User question
+query = st.text_input("Ask a specific question (optional):")
 
 if uploaded_file:
+    # Save uploaded file temporarily
     with open("temp_transcript.txt", "wb") as f:
         f.write(uploaded_file.read())
 
-    # Step 2: Load and Filter Transcript
+    # Load and split
     loader = TextLoader("temp_transcript.txt")
-    docs = loader.load()
+    documents = loader.load()
 
-    # Step 3: Split text into chunks and filter for market-related content
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    all_chunks = splitter.split_documents(docs)
+    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    texts = text_splitter.split_documents(documents)
 
-    market_keywords = ["market", "tam", "sam", "trend", "growth", "opportunity", "customer", "size"]
-    market_chunks = [chunk for chunk in all_chunks if any(kw.lower() in chunk.page_content.lower() for kw in market_keywords)]
+    # Embedding & Vector Store
+    embeddings = OpenAIEmbeddings()
+    db = FAISS.from_documents(texts, embeddings)
 
-    # Step 4: Embed and Store in Chroma
-    embedding = OpenAIEmbeddings()
-    vectordb = Chroma.from_documents(market_chunks, embedding)
-
-    # Step 5: Build and Run QA Chain
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=OpenAI(temperature=0),
-        retriever=vectordb.as_retriever()
-    )
-
-    query = st.text_input("Ask a market-related question from the meeting:")
+    # Search
     if query:
-        response = qa_chain.run(query)
-        st.write("💬", response)
+        docs = db.similarity_search(query)
+    else:
+        docs = texts[:3]  # Default: use first few chunks
+
+    # Run QA chain
+    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
+    chain = load_qa_chain(llm, chain_type="stuff")
+    response = chain.run(input_documents=docs, question=query or "What are the key market insights from this meeting?")
+
+    st.subheader("📌 Extracted Insight")
+    st.write(response)
